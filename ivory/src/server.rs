@@ -1,17 +1,23 @@
+use crate::connection::Connection;
+use crate::error::Error;
+use crate::handler::{Handler, Shutdown};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{self, Duration};
 use tracing::{error, info};
-use crate::error::Error;
 
+#[derive(Debug)]
 pub struct Server {
     // Listen address.
     address: String,
 
     // Limit the max number of connections.
     max_connections: Arc<Semaphore>,
+
+    current_connections: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -41,12 +47,13 @@ impl ServerBuilder {
     pub fn build(self) -> Server {
         let max_connections = match self.max_connections {
             Some(n) => Arc::new(Semaphore::new(n)),
-            None => Arc::new(Semaphore::new(usize::MAX))
+            None => Arc::new(Semaphore::new(usize::MAX)),
         };
 
         Server {
             address: self.address,
             max_connections,
+            current_connections: AtomicUsize::new(0),
         }
     }
 }
@@ -56,12 +63,7 @@ impl Server {
         ServerBuilder::new()
     }
 
-    pub async fn serve(&self, shutdown: impl Future) -> Result<(), Error>{
-        // When the provided `shutdown` future completes, we must send a shutdown
-        // message to all active connections. We use a broadcast channel for this
-        // purpose. The call below ignores the receiver of the broadcast pair, and when
-        // a receiver is needed, the subscribe() method on the sender is used to create
-        // one.
+    pub async fn serve(&self, shutdown: impl Future) -> Result<(), Error> {
         let (notify_shutdown, _) = broadcast::channel(1);
         let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
 
@@ -85,32 +87,30 @@ impl Server {
         Ok(())
     }
 
-    async fn run(&self, notify_shutdown: &broadcast::Sender<()>, shutdown_complete_tx: &mpsc::Sender<()>) -> Result<(), Error>{
+    async fn run(
+        &self,
+        notify_shutdown: &broadcast::Sender<()>,
+        shutdown_complete_tx: &mpsc::Sender<()>,
+    ) -> Result<(), Error> {
         loop {
-            // Wait for a permit to become available
-            //
-            // `acquire_owned` returns a permit that is bound to the semaphore.
-            // When the permit value is dropped, it is automatically returned
-            // to the semaphore.
-            //
-            // `acquire_owned()` returns `Err` when the semaphore has been
-            // closed. We don't ever close the semaphore, so `unwrap()` is safe.
-            let permit = self
-                .max_connections
-                .clone()
-                .acquire_owned()
-                .await
-                .unwrap();
+            let permit = self.max_connections.clone().acquire_owned().await.unwrap();
+
+            let socket = self.accept().await?;
+
+            let mut handler = Handler::new(
+                Connection::new(socket),
+                Shutdown::new(notify_shutdown.subscribe()),
+                shutdown_complete_tx.clone(),
+            );
+
+            tokio::spawn(async move {
+                if let Err(err) = handler.run().await {
+                    error!(cause = ?err, "connection error");
+                }
+
+                drop(permit);
+            });
         }
-
-        // Accept a new socket. This will attempt to perform error handling.
-        // The `accept` method internally attempts to recover errors, so an
-        // error here is non-recoverable.
-        let socket = self.accept().await?;
-
-
-
-        Ok(())
     }
 
     async fn accept(&self) -> Result<TcpStream, Error> {
@@ -120,29 +120,27 @@ impl Server {
 
         let mut backoff = 1;
 
-        // Try to accept a few times
         loop {
-            // Perform the accept operation. If a socket is successfully
-            // accepted, return it. Otherwise, save the error.
             match listener.accept().await {
                 Ok((socket, addr)) => {
                     info!("Client: {} connected", addr);
 
-                    return Ok(socket)
-                },
+                    return Ok(socket);
+                }
                 Err(err) => {
                     if backoff > 64 {
-                        // Accept has failed too many times. Return the error.
                         return Err(err.into());
                     }
                 }
             }
 
-            // Pause execution until the back off period elapses.
             time::sleep(Duration::from_secs(backoff)).await;
 
-            // Double the back off
             backoff *= 2;
         }
+    }
+
+    pub fn current_connections(&self) -> usize {
+        self.current_connections.load(Ordering::Relaxed)
     }
 }

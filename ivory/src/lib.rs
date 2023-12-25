@@ -1,4 +1,6 @@
+mod connection;
 mod error;
+mod handler;
 mod server;
 
 pub fn add(left: usize, right: usize) -> usize {
