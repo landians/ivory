@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "horizon",
+    "horizon-macros",
+    "horizon-build",
+]
+resolver = "2"
