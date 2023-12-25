@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "horizon",
-    "horizon-macros",
-    "horizon-build",
+    "ivory",
+    "ivory-macros",
+    "ivory-build",
 ]
 resolver = "2"
