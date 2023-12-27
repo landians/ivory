@@ -59,12 +59,19 @@ impl ServerBuilder {
 }
 
 impl Server {
+    // 通过 ServerBuilder 来构建 RPC Server
     pub fn builder() -> ServerBuilder {
         ServerBuilder::new()
     }
 
+    // 主要的启动 RPC Serve 的函数, shutdown 通常指的是 ctrl+c 这样的终止 signal
     pub async fn serve(&self, shutdown: impl Future) -> Result<(), Error> {
+        // broadcast，多生产者，多消费者，其中每一条发送的消息都可以被所有接收者收到，因此是广播
+        // server 通过 broadcast 来广播 shutdown 消息, 每个 connection 处理子协程都会订阅这个消息
         let (notify_shutdown, _) = broadcast::channel(1);
+
+        // mpsc, 多生产者，单消费者模式
+        // server 通过 mpsc 来接收每个 connection 处理子协程发送的 shutdown 消息
         let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
 
         tokio::select! {
@@ -87,22 +94,27 @@ impl Server {
         Ok(())
     }
 
+    // server 的实际运行函数
     async fn run(
         &self,
         notify_shutdown: &broadcast::Sender<()>,
         shutdown_complete_tx: &mpsc::Sender<()>,
     ) -> Result<(), Error> {
         loop {
+            // 判断是否允许接受新的连接，用于控制客户端的连接数
             let permit = self.max_connections.clone().acquire_owned().await.unwrap();
 
-            let socket = self.accept().await?;
+            // 接受客户端的连接，并生成对应的客户端套接字
+            let stream = self.accept().await?;
 
+            // Handler 内部包装了 connection, 用于处理和 connection 之间的通信
             let mut handler = Handler::new(
-                Connection::new(socket),
+                Connection::new(stream),
                 Shutdown::new(notify_shutdown.subscribe()),
                 shutdown_complete_tx.clone(),
             );
 
+            // 启动一个子协程来处理和 connection 之间的通信
             tokio::spawn(async move {
                 if let Err(err) = handler.run().await {
                     error!(cause = ?err, "connection error");

@@ -26,6 +26,8 @@ impl Handler {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), Error> {
+        // 只要没有接收到来自 server 广播的 shutdown 消息，则一直运行
+        while !self.shutdown.is_shutdown() {}
         Ok(())
     }
 }
@@ -34,14 +36,14 @@ impl Handler {
 pub(crate) struct Shutdown {
     is_shutdown: bool,
 
-    notify: broadcast::Receiver<()>,
+    notify_shutdown: broadcast::Receiver<()>,
 }
 
 impl Shutdown {
-    pub(crate) fn new(notify: broadcast::Receiver<()>) -> Shutdown {
+    pub(crate) fn new(notify_shutdown: broadcast::Receiver<()>) -> Shutdown {
         Shutdown {
             is_shutdown: false,
-            notify,
+            notify_shutdown,
         }
     }
 
@@ -54,7 +56,7 @@ impl Shutdown {
             return;
         }
 
-        let _ = self.notify.recv().await;
+        let _ = self.notify_shutdown.recv().await;
 
         self.is_shutdown = true;
     }
